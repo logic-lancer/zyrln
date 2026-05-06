@@ -46,13 +46,13 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          path: ./
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/zyrln-linux-amd64
-            artifacts/zyrln-windows-amd64.exe
+            zyrln-linux-amd64
+            zyrln-windows-amd64.exe
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
