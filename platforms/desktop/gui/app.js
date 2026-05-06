@@ -358,11 +358,28 @@ document.getElementById('quitBtn').addEventListener('click', async () => {
   if (!confirm('Are you sure you want to quit Zyrln?')) {
     return;
   }
+  // Attempt to tell the backend to quit, but proceed to close the tab regardless
   try {
-    const resp = await fetch(apiBase + '/api/quit', {method: 'POST'});
-    // App will exit, this won't be reached
+    await fetch(apiBase + '/api/quit', {method: 'POST'});
   } catch (err) {
-    // App exited, connection lost is expected
-    console.log('Quit request sent');
+    // Backend may already be stopping; still attempt to close window
+    console.log('Quit request may have failed or completed:', err);
   }
+
+  // After 500ms, try to close the browser tab. If the browser blocks window.close(), fall back to a blank tab.
+  setTimeout(() => {
+    try {
+      window.close();
+    } catch (e) {
+      // Ignore: some browsers console error when closing programmatically
+    }
+    // Fallback: navigate to a blank page to effectively leave the tab
+    try {
+      if (!window.closed) {
+        window.location.href = 'about:blank';
+      }
+    } catch (e) {
+      // ignore
+    }
+  }, 500);
 });
