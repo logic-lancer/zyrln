@@ -1,6 +1,6 @@
 GOCACHE     ?= /tmp/go-build-cache
 ANDROID_HOME ?= $(HOME)/Android/Sdk
-GOTOOLCHAIN  ?= go1.25.0
+GOTOOLCHAIN  ?= go1.26.0
 GOFLAGS      ?= -buildvcs=false
 AAR_OUT       = android/app/libs/mobile.aar
 APK_VERSION   = 1.4.0
@@ -11,7 +11,7 @@ export ANDROID_HOME
 export GOTOOLCHAIN
 export GOFLAGS
 
-.PHONY: all desktop proxy test android android-debug keystore clean
+.PHONY: all desktop proxy test aar android android-debug keystore install clean gui
 
 all: desktop
 
@@ -37,6 +37,22 @@ test:
 		exit 1; \
 	fi
 	GOCACHE=$(GOCACHE) go run ./platforms/desktop/ -relay-fetch-url 'https://www.gstatic.com/generate_204'
+
+## Start the browser-based GUI (opens at http://127.0.0.1:8086).
+gui:
+	GOCACHE=$(GOCACHE) go run ./platforms/desktop/ -gui
+
+## Build the gomobile AAR for Android.
+## Requires: go install golang.org/x/mobile/cmd/gomobile@latest && gomobile init
+aar:
+	@echo "Building gomobile AAR..."
+	@mkdir -p android/app/libs
+	PATH=$(PATH):$(HOME)/go/bin GOCACHE=$(GOCACHE) gomobile bind \
+		-target android \
+		-androidapi 21 \
+		-o $(AAR_OUT) \
+		zyrln/platforms/mobile
+	@echo "AAR → $(AAR_OUT)"
 
 ## Generate a release signing keystore (run once before `make android`).
 ## Requires: keytool (comes with the JDK)

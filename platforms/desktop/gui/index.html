@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Zyrln - Domain-Fronting Relay</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Zyrln</h1>
+      <p class="subtitle">Domain-Fronting Relay</p>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="control">Control</button>
+      <button class="tab" data-tab="config">Config</button>
+      <button class="tab" data-tab="tools">Tools</button>
+    </nav>
+
+    <!-- Control Tab -->
+    <section class="tab-content active" id="tab-control">
+      <div class="vpn-control">
+        <div class="circle-btn" id="vpnCircle">
+          <div class="circle-inner">
+            <span class="circle-text" id="circleText">OFF</span>
+          </div>
+        </div>
+        <p class="status-text" id="statusText">Proxy is stopped</p>
+        <p class="listen-text" id="listenText">127.0.0.1:8085</p>
+      </div>
+
+      <div class="config-check" id="configCheck">
+        <h3>Configuration Check</h3>
+        <div class="check-item" id="checkAppScript">
+          <span class="check-icon">✗</span>
+          <span>Apps Script URL</span>
+        </div>
+        <div class="check-item" id="checkAuthKey">
+          <span class="check-icon">✗</span>
+          <span>Auth Key</span>
+        </div>
+        <div class="check-item" id="checkCA">
+          <span class="check-icon">✗</span>
+          <span>CA Certificate</span>
+        </div>
+      </div>
+
+      <div class="log-section">
+        <h3>Proxy Logs</h3>
+        <pre id="logOutput" class="output">No logs yet...</pre>
+      </div>
+    </section>
+
+    <!-- Config Tab -->
+    <section class="tab-content" id="tab-config">
+      <form id="configForm">
+        <div class="form-group">
+          <label for="fronted-appscript-url">Apps Script URL</label>
+          <input type="url" id="fronted-appscript-url" name="fronted-appscript-url" placeholder="https://script.google.com/macros/s/...">
+          <span class="hint">Deployed Apps Script web app URL</span>
+        </div>
+
+        <div class="form-group">
+          <label for="auth-key">Auth Key</label>
+          <input type="password" id="auth-key" name="auth-key" placeholder="Your secret auth key">
+          <span class="hint">Must match the key in Apps Script and VPS relay</span>
+        </div>
+
+        <div class="form-group">
+          <label for="listen">Listen Address</label>
+          <input type="text" id="listen" name="listen" placeholder="127.0.0.1:8085">
+        </div>
+
+        <div class="form-group">
+          <label for="front-domain">Front Domain</label>
+          <input type="text" id="front-domain" name="front-domain" placeholder="www.google.com">
+          <span class="hint">Domain for TLS fronting (default: www.google.com)</span>
+        </div>
+
+        <div class="form-group">
+          <label for="proxy">Upstream Proxy</label>
+          <input type="text" id="proxy" name="proxy" placeholder="direct or http://proxy:port">
+          <span class="hint">Use 'direct' for in-country use</span>
+        </div>
+
+        <div class="form-group">
+          <label for="timeout">Timeout (seconds)</label>
+          <input type="number" id="timeout" name="timeout" value="12" min="1" max="60">
+        </div>
+
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary">Save Config</button>
+          <button type="button" class="btn" id="exportConfigBtn">Export for Android</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- Tools Tab -->
+    <section class="tab-content" id="tab-tools">
+      <div class="card">
+        <h3>Certificate Authority</h3>
+        <p>Generate a local CA certificate for HTTPS proxy interception.</p>
+        <button class="btn btn-warning" id="initCaBtn">Generate CA</button>
+        <span id="caActionStatus"></span>
+      </div>
+
+      <div class="card">
+        <h3>Quick Test</h3>
+        <div class="form-group">
+          <input type="url" id="testUrl" placeholder="https://www.gstatic.com/generate_204" value="https://www.gstatic.com/generate_204">
+        </div>
+        <button class="btn" id="testRelayBtn">Test Relay</button>
+        <span id="testStatus"></span>
+        <pre id="testOutput" class="output" style="display:none;"></pre>
+      </div>
+
+      <div class="card">
+        <h3>Run Probes</h3>
+        <div class="form-group">
+          <input type="text" id="category" placeholder="baseline,domain-front (optional)">
+        </div>
+        <button class="btn" id="runProbesBtn">Run Probes</button>
+        <span id="probeStatus"></span>
+        <pre id="probeOutput" class="output" style="display:none;"></pre>
+      </div>
+    </section>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

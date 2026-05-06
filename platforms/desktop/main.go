@@ -8,18 +8,48 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
-	"zyrln/relay/core"
+  	"embed"
+    "zyrln/relay/core"
 )
 
 const defaultProxyAddress = "direct"
+const defaultGUIListen = "127.0.0.1:8086"
+
+// Embedded GUI assets — embeds the gui/ directory itself
+//go:embed gui
+var guiFS embed.FS
+
+// GUI mode state
+var (
+	guiProxyServer *http.Server
+	guiProxyMu     sync.Mutex
+	guiClient      *http.Client
+	guiLogBuf      []string
+	guiLogMu       sync.Mutex
+)
+
+func guiLog(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	fmt.Print(msg)
+	guiLogMu.Lock()
+	guiLogBuf = append(guiLogBuf, msg)
+	if len(guiLogBuf) > 1000 {
+		guiLogBuf = guiLogBuf[len(guiLogBuf)-1000:]
+	}
+	guiLogMu.Unlock()
+}
 
 type probe struct {
 	ID          string            `json:"id"`
@@ -150,7 +180,18 @@ Flags:
 	caKeyFlag := flag.String("ca-key", "certs/zyrln-ca-key.pem", "local CA private key path for HTTPS proxy interception")
 	frontRedirectsFlag := flag.Bool("front-redirects", false, "when a fronted probe gets a redirect, retry the Location using the front domain and encrypted Host override")
 	followRedirectsFlag := flag.Bool("follow-redirects", true, "follow HTTP redirects")
+	guiFlag := flag.Bool("gui", false, "start browser-based GUI (opens at http://gui-listen address)")
+	guiListenFlag := flag.String("gui-listen", defaultGUIListen, "listen address for -gui mode")
 	flag.Parse()
+
+	// GUI mode
+	if *guiFlag {
+		if err := runGUIMode(*guiListenFlag); err != nil {
+			fmt.Fprintf(os.Stderr, "GUI mode failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	// Apply config file values for flags not set on the CLI.
 	setCLI := map[string]bool{}
@@ -660,6 +701,351 @@ func truncate(value string, max int) string {
 		return value[:max]
 	}
 	return value[:max-3] + "..."
+}
+
+func openBrowser(url string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "linux":
+		cmd = exec.Command("xdg-open", url)
+	case "windows":
+		cmd = exec.Command("cmd", "/c", "start", url)
+	case "darwin":
+		cmd = exec.Command("open", url)
+	default:
+		return fmt.Errorf("unsupported operating system: %s", runtime.GOOS)
+	}
+	return cmd.Start()
+}
+
+func runGUIMode(listenAddr string) error {
+	mux := http.NewServeMux()
+
+	// guiFS is rooted at gui/ (due to //go:embed gui)
+	// Use fs.Sub to get a filesystem rooted at the embedded gui/ directory
+	subFS, err := fs.Sub(guiFS, "gui")
+	if err != nil {
+		return fmt.Errorf("failed to create sub filesystem: %w", err)
+	}
+	guiHandler := http.FileServer(http.FS(subFS))
+	mux.Handle("/", guiHandler)
+
+	// API: Get config
+	mux.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			config := loadConfig("config.env")
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"config": config})
+			return
+		}
+		if r.Method == http.MethodPost {
+			var req struct {
+				Config map[string]string `json:"config"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+				return
+			}
+			var lines []string
+			for k, v := range req.Config {
+				lines = append(lines, fmt.Sprintf("%s = %s", k, v))
+			}
+			content := strings.Join(lines, "\n") + "\n"
+			if err := os.WriteFile("config.env", []byte(content), 0644); err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"success": true})
+			return
+		}
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	})
+
+	// API: Status
+	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+		guiProxyMu.Lock()
+		proxyRunning := guiProxyServer != nil
+		guiProxyMu.Unlock()
+
+		caExists := false
+		if _, err := os.Stat("certs/zyrln-ca.pem"); err == nil {
+			caExists = true
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"proxy_running": proxyRunning,
+			"ca_exists":     caExists,
+		})
+	})
+
+	// API: Init CA
+	mux.HandleFunc("/api/init-ca", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := core.GenerateCA("certs/zyrln-ca.pem", "certs/zyrln-ca-key.pem"); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"success": true})
+	})
+
+	// API: Start proxy
+	mux.HandleFunc("/api/proxy/start", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		guiProxyMu.Lock()
+		if guiProxyServer != nil {
+			guiProxyMu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"success": false, "error": "proxy already running"})
+			return
+		}
+		guiProxyMu.Unlock()
+
+		config := loadConfig("config.env")
+		appScriptURL := config["fronted-appscript-url"]
+		authKey := config["auth-key"]
+		listen := config["listen"]
+		if listen == "" {
+			listen = "127.0.0.1:8085"
+		}
+		frontDomain := config["front-domain"]
+		if frontDomain == "" {
+			frontDomain = "www.google.com"
+		}
+
+		if appScriptURL == "" || authKey == "" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"success": false, "error": "fronted-appscript-url and auth-key must be set in config"})
+			return
+		}
+
+		ca, err := core.LoadCA("certs/zyrln-ca.pem", "certs/zyrln-ca-key.pem")
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"success": false, "error": fmt.Sprintf("failed to load CA: %v (run init-ca first)", err)})
+			return
+		}
+
+		guiClient = &http.Client{
+			Timeout: 12 * time.Second,
+			Transport: &http.Transport{
+				TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12},
+				DialContext:         (&net.Dialer{Timeout: 12 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+				MaxIdleConns:        64,
+				MaxIdleConnsPerHost: 8,
+				IdleConnTimeout:     120 * time.Second,
+				TLSHandshakeTimeout: 15 * time.Second,
+				ForceAttemptHTTP2:   true,
+			},
+		}
+
+		srv, _, err := core.StartProxy(listen, []string{appScriptURL}, frontDomain, authKey, ca, guiClient, 12*time.Second)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+			return
+		}
+
+		guiProxyMu.Lock()
+		guiProxyServer = srv
+		guiProxyMu.Unlock()
+
+		guiLog("relay HTTP proxy listening on http://%s\n", listen)
+		guiLog("mode: HTTP and HTTPS via local CA MITM; install %s as trusted CA for browsers\n", "certs/zyrln-ca.pem")
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"success": true})
+	})
+
+	// API: Stop proxy
+	mux.HandleFunc("/api/proxy/stop", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		guiProxyMu.Lock()
+		srv := guiProxyServer
+		guiProxyServer = nil
+		guiProxyMu.Unlock()
+
+		if srv == nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"success": false, "error": "proxy not running"})
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.Shutdown(ctx)
+
+		guiLog("Proxy stopped\n")
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"success": true})
+	})
+
+	// API: Export config for Android
+	mux.HandleFunc("/api/export-config", func(w http.ResponseWriter, r *http.Request) {
+		config := loadConfig("config.env")
+		url := config["fronted-appscript-url"]
+		key := config["auth-key"]
+		if url == "" || key == "" {
+			http.Error(w, `{"error":"fronted-appscript-url and auth-key must be set"}`, http.StatusBadRequest)
+			return
+		}
+		out, _ := json.Marshal(map[string]string{"url": url, "key": key})
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"config": string(out)})
+	})
+
+	// API: Test relay
+	mux.HandleFunc("/api/test-relay", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			URL string `json:"url"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+			return
+		}
+		if req.URL == "" {
+			req.URL = "https://www.gstatic.com/generate_204"
+		}
+
+		config := loadConfig("config.env")
+		appScriptURL := config["fronted-appscript-url"]
+		frontDomain := config["front-domain"]
+		if frontDomain == "" {
+			frontDomain = "www.google.com"
+		}
+		authKey := config["auth-key"]
+
+		if appScriptURL == "" || authKey == "" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"success": false, "error": "fronted-appscript-url and auth-key must be set"})
+			return
+		}
+
+		client := core.NewHTTPClient(12 * time.Second)
+		resp, err := core.RelayRequest(client, appScriptURL, frontDomain, authKey, "GET", req.URL, map[string]string{"User-Agent": "zyrln/0.1"}, nil, 12*time.Second)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"success":     true,
+			"status":      resp.Status,
+			"headers":     resp.Headers,
+			"body_bytes":  len(resp.Body),
+			"body_preview": preview(resp.Body, 500),
+		})
+	})
+
+	// API: Run probes
+	mux.HandleFunc("/api/run-probes", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			Category string `json:"category"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+
+		config := loadConfig("config.env")
+		proxyCfg, _ := parseProxyConfig(config["proxy"])
+		if config["proxy"] == "" {
+			proxyCfg, _ = parseProxyConfig("direct")
+		}
+
+		timeout := 12 * time.Second
+		if t, err := time.ParseDuration(config["timeout"] + "s"); err == nil {
+			timeout = t
+		}
+
+		client := &http.Client{
+			Timeout: timeout,
+			Transport: &http.Transport{
+				Proxy:           proxyCfg.proxyFunc,
+				TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+				DialContext:     proxyCfg.dialContext(timeout),
+			},
+		}
+
+		probes := filterProbes(defaultProbes(), req.Category)
+		if config["fronted-appscript-url"] != "" {
+			fp, err := frontedAppScriptProbes(
+				config["fronted-appscript-url"],
+				config["front-domain"],
+				config["auth-key"],
+				config["target-url"],
+			)
+			if err == nil {
+				probes = append(probes, fp...)
+			}
+		}
+
+		results := make([]result, 0, len(probes))
+		for _, p := range probes {
+			results = append(results, runProbe(client, p, 1, timeout, false))
+		}
+
+		rep := report{
+			GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+			Proxy:       proxyCfg.label,
+			Guard:       proxyCfg.guard,
+			TimeoutMS:   timeout.Milliseconds(),
+			Repeat:      1,
+			Results:     results,
+			Summary:     summarize(results),
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(rep)
+	})
+
+	// API: Get GUI logs
+	mux.HandleFunc("/api/logs", func(w http.ResponseWriter, r *http.Request) {
+		guiLogMu.Lock()
+		logs := make([]string, len(guiLogBuf))
+		copy(logs, guiLogBuf)
+		guiLogMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"logs": logs})
+	})
+
+	fmt.Printf("GUI listening on http://%s\n", listenAddr)
+
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		url := fmt.Sprintf("http://%s/", listenAddr)
+		if err := openBrowser(url); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to open browser: %v\n", err)
+		}
+	}()
+
+	srv := &http.Server{Addr: listenAddr, Handler: mux}
+	return srv.ListenAndServe()
 }
 
 func loadConfig(path string) map[string]string {
