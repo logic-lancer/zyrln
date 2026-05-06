@@ -328,3 +328,20 @@ code {
 .error {
   color: #e74c3c;
 }
+
+/* Quit Section */
+.quit-section {
+  margin-top: 30px;
+  padding: 20px;
+  text-align: center;
+  border-top: 1px solid #ecf0f1;
+}
+
+.btn-danger {
+  background: #e74c3c;
+  color: #fff;
+}
+
+.btn-danger:hover {
+  background: #c0392b;
+}

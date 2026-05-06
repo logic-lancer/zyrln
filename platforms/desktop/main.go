@@ -21,6 +21,8 @@ import (
 	"sync"
 	"time"
   	"embed"
+
+	webview "github.com/webview/webview_go"
     "zyrln/relay/core"
 )
 
@@ -141,6 +143,22 @@ func (p proxyConfig) dialContext(timeout time.Duration) func(context.Context, st
 }
 
 func main() {
+	// If double-clicked (no args and no controlling terminal), launch GUI
+	if len(os.Args) == 1 {
+		// Try to open /dev/tty - fails if no controlling terminal (double-click)
+		tty, err := os.Open("/dev/tty")
+		if err != nil {
+			// No controlling terminal = likely double-clicked
+			fmt.Println("Launching GUI mode (double-clicked)...")
+			if err := runGUIMode(defaultGUIListen); err != nil {
+				fmt.Fprintf(os.Stderr, "GUI mode failed: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+		tty.Close()
+	}
+
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, `Zyrln — domain-fronting reachability tool
 
@@ -1032,6 +1050,16 @@ func runGUIMode(listenAddr string) error {
 		guiLogMu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"logs": logs})
+	})
+
+	// API: Quit application
+	mux.HandleFunc("/api/quit", func(w http.ResponseWriter, r *http.Request) {
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			os.Exit(0)
+		}()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"success": true})
 	})
 
 	fmt.Printf("GUI listening on http://%s\n", listenAddr)

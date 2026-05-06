@@ -352,3 +352,17 @@ document.getElementById('runProbesBtn').addEventListener('click', async () => {
     status.className = 'error';
   }
 });
+
+// Quit button
+document.getElementById('quitBtn').addEventListener('click', async () => {
+  if (!confirm('Are you sure you want to quit Zyrln?')) {
+    return;
+  }
+  try {
+    const resp = await fetch(apiBase + '/api/quit', {method: 'POST'});
+    // App will exit, this won't be reached
+  } catch (err) {
+    // App exited, connection lost is expected
+    console.log('Quit request sent');
+  }
+});
